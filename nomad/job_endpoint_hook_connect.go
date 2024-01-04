@@ -561,14 +561,14 @@ func groupConnectValidate(g *structs.TaskGroup) error {
 		}
 	}
 
-	if err := groupConnectUpstreamsValidate(g.Name, g.Services); err != nil {
+	if err := groupConnectUpstreamsValidate(g, g.Services); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-func groupConnectUpstreamsValidate(group string, services []*structs.Service) error {
+func groupConnectUpstreamsValidate(g *structs.TaskGroup, services []*structs.Service) error {
 	listeners := make(map[string]string) // address -> service
 
 	for _, service := range services {
@@ -578,14 +578,39 @@ func groupConnectUpstreamsValidate(group string, services []*structs.Service) er
 				if s, exists := listeners[listener]; exists {
 					return fmt.Errorf(
 						"Consul Connect services %q and %q in group %q using same address for upstreams (%s)",
-						service.Name, s, group, listener,
+						service.Name, s, g.Name, listener,
 					)
 				}
 				listeners[listener] = service.Name
 			}
+
+			if tp := service.Connect.SidecarService.Proxy.TransparentProxy; tp != nil {
+				for _, portLabel := range tp.ExcludeInboundPorts {
+					if !transparentProxyPortLabelValidate(g, portLabel) {
+						return fmt.Errorf(
+							"Consul Connect transparent proxy port %q must be numeric or one of network.port labels", portLabel)
+					}
+				}
+			}
+
 		}
 	}
 	return nil
+}
+
+func transparentProxyPortLabelValidate(g *structs.TaskGroup, portLabel string) bool {
+	if _, err := strconv.ParseUint(portLabel, 10, 64); err == nil {
+		return true
+	}
+
+	for _, network := range g.Networks {
+		for _, reservedPort := range network.ReservedPorts {
+			if reservedPort.Label == portLabel {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func groupConnectSidecarValidate(g *structs.TaskGroup, s *structs.Service) error {

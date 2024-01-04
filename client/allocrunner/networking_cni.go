@@ -17,12 +17,14 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	cni "github.com/containerd/go-cni"
 	cnilibrary "github.com/containernetworking/cni/libcni"
 	"github.com/coreos/go-iptables/iptables"
+	consulIPTables "github.com/hashicorp/consul/sdk/iptables"
 	log "github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/nomad/nomad/structs"
 	"github.com/hashicorp/nomad/plugins/drivers"
@@ -94,6 +96,70 @@ func (c *cniNetworkConfigurator) Setup(ctx context.Context, alloc *structs.Alloc
 		return nil, err
 	}
 
+	portMapping, portLabels := getPortMapping(alloc, c.ignorePortMappingHostIP)
+	argsMap := map[string]string{
+		// some plugins (ex bridge) reject unknown fields by default,
+		// unless this is set.
+		"IgnoreUnknown": "true",
+		// nomad-specific info for plugins to use
+		"NomadAllocID":   alloc.ID,
+		"NomadNamespace": alloc.Namespace,
+		"NomadTaskGroup": alloc.TaskGroup,
+		// k8s equivalents that some plugins use
+		//"K8S_POD_NAME":      alloc.Job.Name,
+		//"K8S_POD_NAMESPACE": alloc.Namespace,
+		//"K8S_POD_INFRA_CONTAINER_ID": "nomad_init_" + alloc.ID, // nomad_init_$CNI_CONTAINERID"
+	}
+
+	useTproxy := false
+	exposePorts := []string{}
+
+	tg := alloc.Job.LookupTaskGroup(alloc.TaskGroup)
+	for _, svc := range tg.Services {
+		if svc.Connect.HasTransparentProxy() {
+			useTproxy = true
+
+			// TODO: need to add the service's other ports here too I think?
+
+			if svc.Connect.SidecarService.Proxy != nil &&
+				svc.Connect.SidecarService.Proxy.Expose != nil {
+
+				for _, path := range svc.Connect.SidecarService.Proxy.Expose.Paths {
+					if idx, ok := portLabels[path.ListenerPort]; ok {
+						exposePorts = append(exposePorts,
+							strconv.FormatInt(int64(portMapping[idx].HostPort), 10))
+					}
+				}
+
+			}
+		}
+	}
+
+	if useTproxy {
+
+		consulIPTablesCfgMap := &consulIPTables.Config{
+			ConsulDNSIP:          "",    // TODO: figure this out!
+			ConsulDNSPort:        0,     // TODO: figure this out!
+			ProxyUserID:          "101", // hard-coded from Envoy container image!?
+			ProxyInboundPort:     20000, // hard-coded value copied from k8s connect-inject
+			ProxyOutboundPort:    15001, // hard-coded value copied from k8s connect-inject
+			ExcludeInboundPorts:  exposePorts,
+			ExcludeOutboundPorts: []string{}, // TODO: user-defined
+			ExcludeOutboundCIDRs: []string{}, // TODO: user-defined
+			ExcludeUIDs:          []string{}, // TODO: user-defined
+			NetNS:                spec.Path,
+		}
+
+		iptablesCfg, err := json.Marshal(consulIPTablesCfgMap)
+		if err != nil {
+			return nil, err
+		}
+
+		argsMap["NOMAD_IPTABLES_CONFIG"] = string(iptablesCfg)
+
+		c.logger.Info("NOMAD_IPTABLES_CONFIG", "cfg", string(iptablesCfg))
+	}
+
 	// Depending on the version of bridge cni plugin used, a known race could occure
 	// where two alloc attempt to create the nomad bridge at the same time, resulting
 	// in one of them to fail. This rety attempts to overcome those erroneous failures.
@@ -102,7 +168,10 @@ func (c *cniNetworkConfigurator) Setup(ctx context.Context, alloc *structs.Alloc
 	var res *cni.Result
 	for attempt := 1; ; attempt++ {
 		var err error
-		if res, err = c.cni.Setup(ctx, alloc.ID, spec.Path, cni.WithCapabilityPortMap(getPortMapping(alloc, c.ignorePortMappingHostIP))); err != nil {
+		if res, err = c.cni.Setup(ctx, alloc.ID, spec.Path,
+			cni.WithCapabilityPortMap(portMapping),
+			cni.WithLabels(argsMap),
+		); err != nil {
 			c.logger.Warn("failed to configure network", "error", err, "attempt", attempt)
 			switch attempt {
 			case 1:
@@ -237,7 +306,9 @@ func (c *cniNetworkConfigurator) Teardown(ctx context.Context, alloc *structs.Al
 		return err
 	}
 
-	if err := c.cni.Remove(ctx, alloc.ID, spec.Path, cni.WithCapabilityPortMap(getPortMapping(alloc, c.ignorePortMappingHostIP))); err != nil {
+	portMap, _ := getPortMapping(alloc, c.ignorePortMappingHostIP)
+
+	if err := c.cni.Remove(ctx, alloc.ID, spec.Path, cni.WithCapabilityPortMap(portMap)); err != nil {
 		// create a real handle to iptables
 		ipt, iptErr := iptables.New()
 		if iptErr != nil {
@@ -344,8 +415,9 @@ func (c *cniNetworkConfigurator) ensureCNIInitialized() error {
 
 // getPortMapping builds a list of portMapping structs that are used as the
 // portmapping capability arguments for the portmap CNI plugin
-func getPortMapping(alloc *structs.Allocation, ignoreHostIP bool) []cni.PortMapping {
+func getPortMapping(alloc *structs.Allocation, ignoreHostIP bool) ([]cni.PortMapping, map[string]int) {
 	var ports []cni.PortMapping
+	labels := map[string]int{}
 
 	if len(alloc.AllocatedResources.Shared.Ports) == 0 && len(alloc.AllocatedResources.Shared.Networks) > 0 {
 		for _, network := range alloc.AllocatedResources.Shared.Networks {
@@ -359,6 +431,7 @@ func getPortMapping(alloc *structs.Allocation, ignoreHostIP bool) []cni.PortMapp
 						ContainerPort: int32(port.To),
 						Protocol:      proto,
 					})
+					labels[port.Label] = len(ports) - 1
 				}
 			}
 		}
@@ -377,8 +450,9 @@ func getPortMapping(alloc *structs.Allocation, ignoreHostIP bool) []cni.PortMapp
 					portMapping.HostIP = port.HostIP
 				}
 				ports = append(ports, portMapping)
+				labels[port.Label] = len(ports) - 1
 			}
 		}
 	}
-	return ports
+	return ports, labels
 }
