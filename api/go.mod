@@ -4,7 +4,7 @@ go 1.19
 
 require (
 	github.com/docker/go-units v0.5.0
-	github.com/gorilla/websocket v1.5.0
+	github.com/gorilla/websocket v1.5.1
 	github.com/hashicorp/cronexpr v1.1.1
 	github.com/hashicorp/go-cleanhttp v0.5.2
 	github.com/hashicorp/go-multierror v1.1.1
@@ -20,4 +20,5 @@ require (
 	github.com/hashicorp/errwrap v1.0.0 // indirect
 	github.com/mitchellh/go-homedir v1.1.0 // indirect
 	github.com/stretchr/testify v1.8.1 // indirect
+	golang.org/x/net v0.17.0 // indirect
 )
