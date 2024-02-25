@@ -143,7 +143,7 @@
     "qunit": "^2.17.2",
     "qunit-dom": "^2.0.0",
     "sass": "^1.17.3",
-    "testem": "^3.0.3",
+    "testem": "^3.12.0",
     "testem-multi-reporter": "^1.2.0",
     "text-encoder-lite": "^2.0.0",
     "webpack": "^5.69.1",
