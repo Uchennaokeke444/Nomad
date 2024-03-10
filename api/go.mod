@@ -11,12 +11,12 @@ require (
 	github.com/hashicorp/go-rootcerts v1.0.2
 	github.com/mitchellh/go-testing-interface v1.14.1
 	github.com/mitchellh/mapstructure v1.5.0
-	github.com/shoenig/test v0.6.3
+	github.com/shoenig/test v1.7.2
 	golang.org/x/exp v0.0.0-20230108222341-4b8118a2686a
 )
 
 require (
-	github.com/google/go-cmp v0.5.9 // indirect
+	github.com/google/go-cmp v0.6.0 // indirect
 	github.com/hashicorp/errwrap v1.0.0 // indirect
 	github.com/mitchellh/go-homedir v1.1.0 // indirect
 	github.com/stretchr/testify v1.8.1 // indirect
